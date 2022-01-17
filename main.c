@@ -1,6 +1,8 @@
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <syslog.h>
+#include <unistd.h>
 #include <sys/fcntl.h>
 #include <sys/ioctl.h>
 #include <linux/fb.h>
@@ -8,7 +10,7 @@
 
 #include <bcm_host.h>
 
-int process() {
+int process(int primary_display_index, char* secondary_display_device, int left, int top, int width, int height) {
     DISPMANX_DISPLAY_HANDLE_T display;
     DISPMANX_MODEINFO_T display_info;
     DISPMANX_RESOURCE_HANDLE_T screen_resource;
@@ -25,7 +27,7 @@ int process() {
 
     bcm_host_init();
 
-    display = vc_dispmanx_display_open(0);
+    display = vc_dispmanx_display_open(primary_display_index);
     if (!display) {
         syslog(LOG_ERR, "Unable to open primary display");
         return -1;
@@ -38,7 +40,15 @@ int process() {
     syslog(LOG_INFO, "Primary display is %d x %d", display_info.width, display_info.height);
 
 
-    fbfd = open("/dev/fb1", O_RDWR);
+    if (width < 0) {
+        width = display_info.width - left;
+    }
+    if (height < 0) {
+        height = display_info.height - top;
+    }
+
+
+    fbfd = open(secondary_display_device, O_RDWR);
     if (fbfd == -1) {
         syslog(LOG_ERR, "Unable to open secondary display");
         return -1;
@@ -86,8 +96,48 @@ int process() {
 }
 
 int main(int argc, char **argv) {
+    int primary_display_index = 0;
+    char* secondary_display_device = "/dev/fb1";
+    int left = 0, top = 0;
+    int width = -1, height = -1;    // Negative values mean default
+    int opt;
+
     setlogmask(LOG_UPTO(LOG_DEBUG));
     openlog("fbcp", LOG_NDELAY | LOG_PID, LOG_USER);
 
-    return process();
+    while ((opt = getopt(argc, argv, "p:s:l:t:w:h:")) >= 0) {
+        switch (opt) {
+            case 'p':
+                primary_display_index = atoi(optarg);
+                break;
+            case 's':
+                secondary_display_device = optarg;
+                break;
+            case 'l':
+                left = atoi(optarg);
+                break;
+            case 't':
+                top = atoi(optarg);
+                break;
+            case 'w':
+                width = atoi(optarg);
+                break;
+            case 'h':
+                height = atoi(optarg);
+                break;
+            default:    // Unknown option
+                fprintf(stderr, "Usage: %s [OPTIONS]\n", argv[0]);
+                fputs("OPTIONS:\n", stderr);
+                fputs("\t-p INDEX: Set primary display index. Default is 0.\n", stderr);
+                fputs("\t-s DEV: Set secondary display device. Default is /dev/fb1 .\n", stderr);
+                fputs("\t-l LEFT, -t TOP: Set left or top coordinate of rectangle to copy.\n", stderr);
+                fputs("\t\tDefault is (0,0).\n", stderr);
+                fputs("\t-w WIDTH, -h HEIGHT: Set size of rectangle to copy.\n", stderr);
+                fputs("\t\tDefault is (display_width-LEFT,display_height-TOP).\n", stderr);
+                exit(-1);
+                break;
+        }
+    }
+
+    return process(primary_display_index, secondary_display_device, left, top, width, height);
 }
