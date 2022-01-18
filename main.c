@@ -11,12 +11,15 @@
 #include <bcm_host.h>
 
 int process(int primary_display_index, char* secondary_display_device, int left, int top, int width, int height) {
-    DISPMANX_DISPLAY_HANDLE_T display;
+    DISPMANX_DISPLAY_HANDLE_T display, offscreen;
     DISPMANX_MODEINFO_T display_info;
-    DISPMANX_RESOURCE_HANDLE_T screen_resource;
+    DISPMANX_RESOURCE_HANDLE_T screen_resource, capture_resource;
+    DISPMANX_UPDATE_HANDLE_T update;
+    DISPMANX_ELEMENT_HANDLE_T element;
     VC_IMAGE_TRANSFORM_T transform;
-    uint32_t image_prt;
-    VC_RECT_T rect1;
+    VC_DISPMANX_ALPHA_T alpha;
+    uint32_t screen_image_prt, capture_image_prt;
+    VC_RECT_T screen_rect, crop_rect;
     int ret;
     int fbfd = 0;
     char *fbp = 0;
@@ -24,6 +27,10 @@ int process(int primary_display_index, char* secondary_display_device, int left,
     struct fb_var_screeninfo vinfo;
     struct fb_fix_screeninfo finfo;
 
+    // Totally opaque
+    alpha.flags = DISPMANX_FLAGS_ALPHA_FROM_SOURCE | DISPMANX_FLAGS_ALPHA_FIXED_ALL_PIXELS;
+    alpha.opacity = 255;
+    alpha.mask = DISPMANX_NO_HANDLE;
 
     bcm_host_init();
 
@@ -64,7 +71,18 @@ int process(int primary_display_index, char* secondary_display_device, int left,
 
     syslog(LOG_INFO, "Second display is %d x %d %dbps\n", vinfo.xres, vinfo.yres, vinfo.bits_per_pixel);
 
-    screen_resource = vc_dispmanx_resource_create(VC_IMAGE_RGB565, vinfo.xres, vinfo.yres, &image_prt);
+    // Create resource (GPU image) to store captured image
+    capture_resource = vc_dispmanx_resource_create(VC_IMAGE_RGB565, display_info.width, display_info.height, &capture_image_prt);
+    if (!capture_resource) {
+        syslog(LOG_ERR, "Unable to create capture buffer");
+        close(fbfd);
+        ret = vc_dispmanx_resource_delete(capture_resource);
+        vc_dispmanx_display_close(display);
+        return -1;
+    }
+
+    // Create resource (GPU image) to store result of cropping and scaling
+    screen_resource = vc_dispmanx_resource_create(VC_IMAGE_RGB565, vinfo.xres, vinfo.yres, &screen_image_prt);
     if (!screen_resource) {
         syslog(LOG_ERR, "Unable to create screen buffer");
         close(fbfd);
@@ -81,17 +99,47 @@ int process(int primary_display_index, char* secondary_display_device, int left,
         return -1;
     }
 
-    vc_dispmanx_rect_set(&rect1, 0, 0, vinfo.xres, vinfo.yres);
+    vc_dispmanx_rect_set(&screen_rect, 0, 0, vinfo.xres, vinfo.yres);
 
+    // Create offscreen display for cropping and scaling
+    offscreen = vc_dispmanx_display_open_offscreen(screen_resource, DISPMANX_NO_ROTATE);
+    if (!offscreen) {
+        syslog(LOG_ERR, "Unable to open offscreen display");
+        munmap(fbp, finfo.smem_len);
+        close(fbfd);
+        ret = vc_dispmanx_resource_delete(screen_resource);
+        ret = vc_dispmanx_resource_delete(capture_resource);
+        vc_dispmanx_display_close(display);
+        return -1;
+    }
+
+    vc_dispmanx_rect_set(&crop_rect, left, top, width, height);
+
+    // Prepare content of offscreen display
+    update = vc_dispmanx_update_start(0);
+    element = vc_dispmanx_element_add(update, offscreen, 0, &screen_rect, capture_resource, &crop_rect, DISPMANX_PROTECTION_NONE, &alpha, NULL, DISPMANX_NO_ROTATE);
+    ret = vc_dispmanx_update_submit_sync(update);
+
+    // Main loop
     while (1) {
-        ret = vc_dispmanx_snapshot(display, screen_resource, 0);
-        vc_dispmanx_resource_read_data(screen_resource, &rect1, fbp, vinfo.xres * vinfo.bits_per_pixel / 8);
+        // Capture screenshot as a resource
+        ret = vc_dispmanx_snapshot(display, capture_resource, DISPMANX_NO_ROTATE);
+
+        // Crop and scale using offscreen display
+        update = vc_dispmanx_update_start(0);
+        ret = vc_dispmanx_element_modified(update, element, &crop_rect);
+        ret = vc_dispmanx_update_submit_sync(update);
+
+        // Read result into Linux framebuffer
+        vc_dispmanx_resource_read_data(screen_resource, &screen_rect, fbp, vinfo.xres * vinfo.bits_per_pixel / 8);
         usleep(25 * 1000);
     }
 
     munmap(fbp, finfo.smem_len);
     close(fbfd);
+    vc_dispmanx_display_close(offscreen);
     ret = vc_dispmanx_resource_delete(screen_resource);
+    ret = vc_dispmanx_resource_delete(capture_resource);
     vc_dispmanx_display_close(display);
 }
 
