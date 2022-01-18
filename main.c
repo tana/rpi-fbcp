@@ -76,7 +76,6 @@ int process(int primary_display_index, char* secondary_display_device, int left,
     if (!capture_resource) {
         syslog(LOG_ERR, "Unable to create capture buffer");
         close(fbfd);
-        ret = vc_dispmanx_resource_delete(capture_resource);
         vc_dispmanx_display_close(display);
         return -1;
     }
@@ -86,6 +85,7 @@ int process(int primary_display_index, char* secondary_display_device, int left,
     if (!screen_resource) {
         syslog(LOG_ERR, "Unable to create screen buffer");
         close(fbfd);
+        ret = vc_dispmanx_resource_delete(capture_resource);
         vc_dispmanx_display_close(display);
         return -1;
     }
@@ -95,6 +95,7 @@ int process(int primary_display_index, char* secondary_display_device, int left,
         syslog(LOG_ERR, "Unable to create memory mapping");
         close(fbfd);
         ret = vc_dispmanx_resource_delete(screen_resource);
+        ret = vc_dispmanx_resource_delete(capture_resource);
         vc_dispmanx_display_close(display);
         return -1;
     }
@@ -113,7 +114,9 @@ int process(int primary_display_index, char* secondary_display_device, int left,
         return -1;
     }
 
-    vc_dispmanx_rect_set(&crop_rect, left, top, width, height);
+    // In source rect of an element, it seems the components need to be shifted by 16
+    // See: /opt/vc/src/hello_pi/hello_dispmanx ( https://github.com/raspberrypi/firmware/blob/3f20b832b27cd730deb6419b570f31a98167eef6/opt/vc/src/hello_pi/hello_dispmanx/dispmanx.c#L126 )
+    vc_dispmanx_rect_set(&crop_rect, left << 16, top << 16, width << 16, height << 16);
 
     // Prepare content of offscreen display
     update = vc_dispmanx_update_start(0);
