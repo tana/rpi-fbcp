@@ -1,6 +1,8 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
+#include <string.h>
 #include <syslog.h>
 #include <unistd.h>
 #include <sys/fcntl.h>
@@ -10,13 +12,12 @@
 
 #include <bcm_host.h>
 
-int process(int primary_display_index, char* secondary_display_device, int left, int top, int width, int height) {
+int process(int primary_display_index, char* secondary_display_device, int left, int top, int width, int height, DISPMANX_TRANSFORM_T transform) {
     DISPMANX_DISPLAY_HANDLE_T display, offscreen;
     DISPMANX_MODEINFO_T display_info;
     DISPMANX_RESOURCE_HANDLE_T screen_resource, capture_resource;
     DISPMANX_UPDATE_HANDLE_T update;
     DISPMANX_ELEMENT_HANDLE_T element;
-    VC_IMAGE_TRANSFORM_T transform;
     VC_DISPMANX_ALPHA_T alpha;
     uint32_t screen_image_prt, capture_image_prt;
     VC_RECT_T screen_rect, crop_rect;
@@ -120,7 +121,7 @@ int process(int primary_display_index, char* secondary_display_device, int left,
 
     // Prepare content of offscreen display
     update = vc_dispmanx_update_start(0);
-    element = vc_dispmanx_element_add(update, offscreen, 0, &screen_rect, capture_resource, &crop_rect, DISPMANX_PROTECTION_NONE, &alpha, NULL, DISPMANX_NO_ROTATE);
+    element = vc_dispmanx_element_add(update, offscreen, 0, &screen_rect, capture_resource, &crop_rect, DISPMANX_PROTECTION_NONE, &alpha, NULL, transform);
     ret = vc_dispmanx_update_submit_sync(update);
 
     // Main loop
@@ -151,12 +152,14 @@ int main(int argc, char **argv) {
     char* secondary_display_device = "/dev/fb1";
     int left = 0, top = 0;
     int width = -1, height = -1;    // Negative values mean default
+    int rotation = 0;
+    char* flip_str = "";
     int opt;
 
     setlogmask(LOG_UPTO(LOG_DEBUG));
     openlog("fbcp", LOG_NDELAY | LOG_PID, LOG_USER);
 
-    while ((opt = getopt(argc, argv, "p:s:l:t:w:h:")) >= 0) {
+    while ((opt = getopt(argc, argv, "p:s:l:t:w:h:r:f:")) >= 0) {
         switch (opt) {
             case 'p':
                 primary_display_index = atoi(optarg);
@@ -176,6 +179,12 @@ int main(int argc, char **argv) {
             case 'h':
                 height = atoi(optarg);
                 break;
+            case 'r':
+                rotation = atoi(optarg);
+                break;
+            case 'f':
+		flip_str = optarg;
+                break;
             default:    // Unknown option
                 fprintf(stderr, "Usage: %s [OPTIONS]\n", argv[0]);
                 fputs("OPTIONS:\n", stderr);
@@ -185,10 +194,49 @@ int main(int argc, char **argv) {
                 fputs("\t\tDefault is (0,0).\n", stderr);
                 fputs("\t-w WIDTH, -h HEIGHT: Set size of rectangle to copy.\n", stderr);
                 fputs("\t\tDefault is (display_width-LEFT,display_height-TOP).\n", stderr);
+                fputs("\t-r ANGLE: Set rotation angle (0, 90, 180, 270).\n", stderr);
+                fputs("\t-f FLIP_STR: Flip image to be displayed.\n", stderr);
+		fputs("\t\tFLIP_STR can be \"v\" (vertical flip), \"h\" (horizontal), or \"vh\" (both).\n", stderr);
                 exit(-1);
                 break;
         }
     }
 
-    return process(primary_display_index, secondary_display_device, left, top, width, height);
+    // Tansform option for DispmanX
+    DISPMANX_TRANSFORM_T transform;
+    // Rotation component
+    switch (rotation) {
+        case 0:
+            transform = DISPMANX_NO_ROTATE;
+            break;
+        case 90:
+            transform = DISPMANX_ROTATE_90;
+            break;
+        case 180:
+            transform = DISPMANX_ROTATE_180;
+            break;
+        case 270:
+            transform = DISPMANX_ROTATE_270;
+            break;
+        default:
+            fputs("Invalid rotation angle\n", stderr);
+            exit(-1);
+            break;
+    }
+    // Flip component
+    int flip_str_len = strlen(flip_str);
+    for (int i = 0; i < flip_str_len; i++) {
+        switch (flip_str[i]) {
+            case 'v':
+            case 'V':
+                transform |= DISPMANX_FLIP_VERT;
+                break;
+            case 'h':
+            case 'H':
+                transform |= DISPMANX_FLIP_HRIZ;
+                break;
+        }
+    }
+
+    return process(primary_display_index, secondary_display_device, left, top, width, height, transform);
 }
